@@ -1,10 +1,39 @@
 const scheduler = require('node-schedule');
+const yaml = require('js-yaml');
+
+const defaultConfig = {
+	cron: '* * * * * 7'
+};
 
 let repositories = [];
 
-function addRepository (repository, api) {
-	// TODO: Get repo config
-	let schedule = scheduler.scheduleJob({ second: 1 }, () => executeSchedule(repository, api));
+async function getConfig (repository, api) {
+	let config = null;
+
+	try {
+		let configFile = await api.repos.getContent({
+			repo: repository.name,
+			owner: repository.owner.login,
+			path: '.github/scheduled-merge.yml'
+	    });
+
+		if (configFile) {
+			let content = Buffer.from(configFile.data.content, 'base64');
+			config = yaml.safeLoad(content.toString());
+		}
+	} catch (error) {
+		if (error.code != 404) {
+			throw error;
+		}
+	}
+
+	return config || defaultConfig;
+}
+
+async function addRepository (repository, api) {
+	let config = await getConfig(repository, api);
+	let schedule = scheduler.scheduleJob(config.cron, () => executeSchedule(repository, api));
+
 	repositories.push({ repository, schedule });
 }
 
