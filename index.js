@@ -1,9 +1,10 @@
 const scheduler = require('node-schedule');
 const yaml = require('js-yaml');
 
-const defaultConfig = {
-	cron: '* * * * * 7'
-};
+const defaultConfig = { cron: '* * * * * 7' };
+const POSITIVE_REACTIONS = ['+1'];
+const NEGATIVE_REACTIONS = ['-1'];
+
 
 let repositories = [];
 
@@ -47,7 +48,62 @@ function removeRepository (repository) {
 }
 
 async function executeSchedule (repository, api) {
-	console.log(`I run on ${repository.name} at ${new Date()}`);
+	let pullRequests = await api.pullRequests.getAll({
+		repo: repository.name,
+		owner: repository.owner.login,
+		state: 'open'
+	});
+
+	if (pullRequests.data && pullRequests.data.length > 0) {
+		let scores = [];
+		
+		for (let pullRequest of pullRequests.data) {
+			let reactions = await api.reactions.getForIssue({
+				repo: repository.name,
+				owner: repository.owner.login,
+				number: pullRequest.number
+			});
+
+			let score = reactions.data.reduce((total, reaction) => {
+				if (POSITIVE_REACTIONS.includes(reaction.content)) {
+					return total + 1;
+				} else if (NEGATIVE_REACTIONS.includes(reaction.content)) {
+					return total - 1;
+				}
+
+				return total;
+			}, 0);
+
+			for (let reaction of reactions.data) {
+				await api.reactions.delete({
+					reaction_id: reaction.id,
+					headers: {
+						accept: 'application/vnd.github.squirrel-girl-preview+json'
+					}
+				});
+			}
+
+			scores.push({ pullRequest, score });
+		};
+
+		scores.sort((a, b) => a.score - b.score);
+
+		let pullRequestToMerge = scores.pop().pullRequest;
+		await api.pullRequests.merge({
+			repo: repository.name,
+			owner: repository.owner.login,
+			number: pullRequestToMerge.number
+		});
+
+		for (let score of scores) {
+			await api.pullRequests.update({
+				repo: repository.name,
+				owner: repository.owner.login,
+				number: score.pullRequest.number,
+				state: 'closed'
+			});
+		}
+	}
 }
 
 module.exports = async robot => {
