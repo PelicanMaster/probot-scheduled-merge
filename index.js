@@ -1,15 +1,15 @@
-const scheduler = require('node-schedule');
-const yaml = require('js-yaml');
+const scheduler = require('node-schedule'),
+	  yaml 		= require('js-yaml');
 
-const defaultConfig = { cron: '* * * * * 7' };
-const POSITIVE_REACTIONS = ['+1'];
-const NEGATIVE_REACTIONS = ['-1'];
-
+const defaultConfig 	 = { cron: '* * * * * 7' },
+	  POSITIVE_REACTIONS = ['+1'],
+	  NEGATIVE_REACTIONS = ['-1'];
 
 let repositories = [];
 
-async function getConfig (repository, api) {
-	let config = null;
+async function getConfig (repository, authenticator) {
+	let config = null,
+		api = await authenticator();
 
 	try {
 		let configFile = await api.repos.getContent({
@@ -31,9 +31,9 @@ async function getConfig (repository, api) {
 	return config || defaultConfig;
 }
 
-async function addRepository (repository, api) {
-	let config = await getConfig(repository, api);
-	let schedule = scheduler.scheduleJob(config.cron, () => executeSchedule(repository, api));
+async function addRepository (repository, authenticator) {
+	let config = await getConfig(repository, authenticator),
+		schedule = scheduler.scheduleJob(config.cron, () => executeSchedule(repository, authenticator));
 
 	repositories.push({ repository, schedule });
 }
@@ -47,16 +47,18 @@ function removeRepository (repository) {
 	}
 }
 
-async function executeSchedule (repository, api) {
-	let pullRequests = await api.pullRequests.getAll({
-		repo: repository.name,
-		owner: repository.owner.login,
-		state: 'open'
-	});
+async function executeSchedule (repository, authenticator) {
+	console.log(`[${new Date()}] Running on ${repository.name}...`);
+	let api = await authenticator(),
+		pullRequests = await api.pullRequests.getAll({
+			repo: repository.name,
+			owner: repository.owner.login,
+			state: 'open'
+		});
 
 	if (pullRequests.data && pullRequests.data.length > 0) {
 		let scores = [];
-		
+
 		for (let pullRequest of pullRequests.data) {
 			let reactions = await api.reactions.getForIssue({
 				repo: repository.name,
@@ -88,7 +90,10 @@ async function executeSchedule (repository, api) {
 
 		scores.sort((a, b) => a.score - b.score);
 
+		console.log(`[${new Date()}]\tSorted pull requests to : `, scores.map(p => ({ id: p.pullRequest.id, score: p.score })));
+
 		let pullRequestToMerge = scores.pop().pullRequest;
+		console.log(`[${new Date()}]\tMerging PR #${pullRequestToMerge.number}...`);
 		await api.pullRequests.merge({
 			repo: repository.name,
 			owner: repository.owner.login,
@@ -96,6 +101,7 @@ async function executeSchedule (repository, api) {
 		});
 
 		for (let score of scores) {
+			console.log(`[${new Date()}]\tClosing PR #${score.pullRequest.number}...`);
 			await api.pullRequests.update({
 				repo: repository.name,
 				owner: repository.owner.login,
@@ -104,6 +110,12 @@ async function executeSchedule (repository, api) {
 			});
 		}
 	}
+
+	console.log(`[${new Date()}]\tEnded running on ${repository.name}.`);
+}
+
+async function getAuthenticatedAPI (installationId, robot) {
+	return robot.auth(installationId);
 }
 
 module.exports = async robot => {
@@ -112,11 +124,11 @@ module.exports = async robot => {
 
 	console.log(`Adding 'installation' hook...`);
 	robot.on('installation.created', context => {
-		context.payload.repositories.forEach(addRepository);
+		context.payload.repositories.forEach(repository => addRepository(repository, () => getAuthenticatedAPI(context.installation.id, robot)));
 	});
 
 	robot.on('installation.deleted', context => {
-		context.payload.repositories.forEach(removeRepository);
+		context.payload.repositories.forEach(repository => removeRepository(repository));
 	});
 
 	console.log(`Rescheduling on older installations...`);
@@ -126,6 +138,6 @@ module.exports = async robot => {
 		let installation = await robot.auth(id),
 			{ data } = await installation.apps.getInstallationRepositories();
 
-		data.repositories.forEach(repository => addRepository(repository, installation));
+		data.repositories.forEach(repository => addRepository(repository, () => getAuthenticatedAPI(id, robot)));
 	});
 }
